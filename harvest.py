@@ -225,7 +225,7 @@ def listings(text):
 def wikivoyage_city(title):
     titles = [title]
     try:
-        ap = wv({"action": "query", "list": "allpages", "apprefix": title + "/", "apnamespace": 0, "aplimit": 50})
+        ap = wv({"action": "query", "list": "allpages", "apprefix": title + "/", "apnamespace": 0, "aplimit": "max"})  # big cities have 50+ districts
         titles += [x["title"] for x in ap.get("query", {}).get("allpages", [])]
     except Exception as e:
         print("  wv subpages failed", e, flush=True)
@@ -268,18 +268,35 @@ def harvest_city(geo, title, rkm):
     return {"s": slug(title), "n": title, "geo": geo, "cc": geo.split(",")[-1].strip(), "la": round(lat, 4), "lo": round(lon, 4), "r": rkm, "osm": recs, "wv": wvl}
 
 
+# GitHub stops a job after 6 hours. Stop starting new cities well before that, so the ones already done are always kept.
+TIME_LIMIT_S = int(os.environ.get("HARVEST_TIME_LIMIT_S", str(300 * 60)))
+
+
+def save(res, n):
+    """Written after EVERY city, so a slow run or a crash never loses the cities already finished."""
+    tmp = f"out/part-{n}.json.tmp"
+    json.dump(res, open(tmp, "w"), ensure_ascii=False, separators=(",", ":"))
+    os.replace(tmp, f"out/part-{n}.json")
+
+
 def part(n, m):
     os.makedirs("out", exist_ok=True)
-    res = []
+    res, t0, skipped = [], time.time(), []
     for i in range(n, len(C), m):
         geo, title, rkm = C[i]
+        if time.time() - t0 > TIME_LIMIT_S:
+            skipped.append(geo)
+            continue
         print(f"[{i + 1}/{len(C)}] {geo}", flush=True)
         try:
             res.append(harvest_city(geo, title, rkm))
+            save(res, n)
         except Exception as e:
             print("  FAILED", e, flush=True)
         time.sleep(10)
-    json.dump(res, open(f"out/part-{n}.json", "w"), ensure_ascii=False, separators=(",", ":"))
+    save(res, n)
+    if skipped:
+        print(f"Out of time - skipped {len(skipped)} cities (they keep last month's data): {', '.join(skipped)}", flush=True)
 
 
 def trim(r):
@@ -323,10 +340,32 @@ def merge():
         total += len(c["osm"])
     for k, t in tiles.items():
         json.dump({"p": [trim(r) for r in t.values()]}, open(f"site/t/{k}.json", "w"), ensure_ascii=False, separators=(",", ":"))
+    # Any city that failed or ran out of time this month keeps LAST month's files (from the previous "data" branch in prev/).
+    kept = carry_forward(index, set(tiles))
     json.dump({"v": 1, "built": time.strftime("%Y-%m-%d"), "tile": TILE, "cities": index,
                "credit": "Places (c) OpenStreetMap contributors (ODbL); picks from Wikivoyage (CC BY-SA)"},
               open("site/index.json", "w"), ensure_ascii=False, separators=(",", ":"))
-    print(f"{len(index)} cities, {total} places, {len(tiles)} area files")
+    print(f"{len(index)} cities ({kept} kept from last month), {total} new places, {len(tiles)} new area files")
+
+
+def carry_forward(index, new_tiles, prev="prev"):
+    try:
+        old = json.load(open(f"{prev}/index.json"))
+    except (OSError, ValueError):
+        return 0
+    have = {c["s"] for c in index}
+    kept = 0
+    for c in old.get("cities", []):
+        if c["s"] in have:
+            continue
+        if os.path.exists(f"{prev}/c/{c['s']}.json"):
+            os.replace(f"{prev}/c/{c['s']}.json", f"site/c/{c['s']}.json")
+        for k in c.get("t", []):
+            if k not in new_tiles and os.path.exists(f"{prev}/t/{k}.json") and not os.path.exists(f"site/t/{k}.json"):
+                os.replace(f"{prev}/t/{k}.json", f"site/t/{k}.json")
+        index.append(dict(c, stale=old.get("built", "")))
+        kept += 1
+    return kept
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 C = [
 ("Kuala Lumpur, Malaysia","Kuala Lumpur",14),("George Town, Penang, Malaysia","George Town (Malaysia)",10),("Johor Bahru, Malaysia","Johor Bahru",12),
 ("Malacca City, Malaysia","Malacca",8),("Kota Kinabalu, Malaysia","Kota Kinabalu",8),("Kuching, Malaysia","Kuching",8),("Ipoh, Malaysia","Ipoh",8),
-("Singapore","Singapore",15),("Bangkok, Thailand","Bangkok",15),("Chiang Mai, Thailand","Chiang Mai",8),("Phuket Town, Thailand","Phuket",12),
+("Singapore","Singapore",15),("Bangkok, Thailand","Bangkok",15),("Chiang Mai, Thailand","Chiang Mai",8),("Phuket Town, Thailand","Phuket Town",12),
 ("Jakarta, Indonesia","Jakarta",15),("Denpasar, Bali, Indonesia","Denpasar",14),("Yogyakarta, Indonesia","Yogyakarta",8),
 ("Manila, Philippines","Manila",14),("Cebu City, Philippines","Cebu City",8),("Ho Chi Minh City, Vietnam","Ho Chi Minh City",12),("Hanoi, Vietnam","Hanoi",10),
 ("Da Nang, Vietnam","Da Nang",8),("Phnom Penh, Cambodia","Phnom Penh",8),("Siem Reap, Cambodia","Siem Reap",6),("Yangon, Myanmar","Yangon",8),
