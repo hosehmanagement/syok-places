@@ -27,8 +27,10 @@ jobs:
           python-version: "3.12"
       - run: python harvest.py part ${{ matrix.part }} 5
       - uses: actions/upload-artifact@v4
+        if: always() # keep the cities already finished, even if the job failed or ran out of time
         with:
           name: part-${{ matrix.part }}
+          if-no-files-found: warn
           path: out/part-${{ matrix.part }}.json
           retention-days: 3
 
@@ -44,6 +46,8 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: out
+      - name: Get last month's files (kept for any city that fails this time)
+        run: git fetch -q --depth=1 origin data && git worktree add -q prev FETCH_HEAD || echo "no previous data yet"
       - run: python harvest.py merge
       - name: Publish to the data branch
         run: |
