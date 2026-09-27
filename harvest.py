@@ -8,7 +8,9 @@ Sources (both free and legal to store and share):
 
 Usage:
   python harvest.py part N M   -> harvests cities N, N+M, N+2M ... into out/part-N.json
+  python harvest.py retry F    -> harvests ONLY the cities listed in F (last run's missing.json) into out/part-retry.json
   python harvest.py merge      -> turns every out/part-*.json into site/ (index.json, t/<tile>.json, c/<city>.json)
+                                  and writes site/missing.json = cities that failed this time (retried 6 hours later)
 
 Only the Python standard library is used.
 """
@@ -299,6 +301,51 @@ def part(n, m):
         print(f"Out of time - skipped {len(skipped)} cities (they keep last month's data): {', '.join(skipped)}", flush=True)
 
 
+def retry(path):
+    """Harvest only the cities that failed last time. Every other city keeps its files from the data branch."""
+    try:
+        want = set(json.load(open(path)).get("geos", []))
+    except (OSError, ValueError):
+        want = set()
+    if not want and os.path.exists("index.json"):  # no missing.json yet (older data): retry every city not in the index
+        have = {c["s"] for c in json.load(open("index.json")).get("cities", [])}
+        want = {geo for geo, title, _ in C if slug(title) not in have}
+    os.makedirs("out", exist_ok=True)
+    res = []
+    for geo, title, rkm in C:
+        if geo not in want:
+            continue
+        print(f"[retry] {geo}", flush=True)
+        try:
+            res.append(harvest_city(geo, title, rkm))
+        except Exception as e:
+            print("  FAILED again", e, flush=True)
+        save(res, "retry")
+        time.sleep(10)
+    save(res, "retry")
+
+
+RETRY_AFTER_S = 6 * 3600
+MAX_RETRIES = 5  # after 5 failed retries, the city simply waits for next month's full run
+
+
+def write_missing(fresh, prev="prev", now=None):
+    """missing.json tells the hourly checker which cities to retry, and when (6 hours after this run)."""
+    now = int(now if now is not None else time.time())
+    try:
+        old = json.load(open(f"{prev}/missing.json"))
+    except (OSError, ValueError):
+        old = {}
+    retrying = os.environ.get("MODE") == "retry"
+    # Full run: every city not downloaded. Retry run: only the ones retried that failed AGAIN (the rest are fine).
+    asked = set(old.get("geos", [])) if retrying else None
+    geos = [geo for geo, title, _ in C if slug(title) not in fresh and (asked is None or geo in asked)]
+    attempt = old.get("attempt", 0) + 1 if retrying else 0
+    info = {"geos": geos, "failed_at": now, "retry_after": now + RETRY_AFTER_S, "attempt": attempt, "give_up": attempt >= MAX_RETRIES}
+    json.dump(info, open("site/missing.json", "w"), ensure_ascii=False, indent=1)
+    return info
+
+
 def trim(r):
     while r and r[-1] in ("", None):
         r = r[:-1]
@@ -341,11 +388,15 @@ def merge():
     for k, t in tiles.items():
         json.dump({"p": [trim(r) for r in t.values()]}, open(f"site/t/{k}.json", "w"), ensure_ascii=False, separators=(",", ":"))
     # Any city that failed or ran out of time this month keeps LAST month's files (from the previous "data" branch in prev/).
+    fresh = {c["s"] for c in index}
     kept = carry_forward(index, set(tiles))
     json.dump({"v": 1, "built": time.strftime("%Y-%m-%d"), "tile": TILE, "cities": index,
                "credit": "Places (c) OpenStreetMap contributors (ODbL); picks from Wikivoyage (CC BY-SA)"},
               open("site/index.json", "w"), ensure_ascii=False, separators=(",", ":"))
-    print(f"{len(index)} cities ({kept} kept from last month), {total} new places, {len(tiles)} new area files")
+    miss = write_missing(fresh)
+    print(f"{len(index)} cities ({kept} kept from before), {total} new places, {len(tiles)} new area files")
+    if miss["geos"]:
+        print(f"Not downloaded this time: {', '.join(miss['geos'])} -> " + ("no more retries until next month" if miss["give_up"] else "retry in 6 hours"))
 
 
 def carry_forward(index, new_tiles, prev="prev"):
@@ -363,7 +414,8 @@ def carry_forward(index, new_tiles, prev="prev"):
         for k in c.get("t", []):
             if k not in new_tiles and os.path.exists(f"{prev}/t/{k}.json") and not os.path.exists(f"site/t/{k}.json"):
                 os.replace(f"{prev}/t/{k}.json", f"site/t/{k}.json")
-        index.append(dict(c, stale=old.get("built", "")))
+        # A retry run only refreshes the failed cities; everyone else is still this month's data, not "stale".
+        index.append(c if os.environ.get("MODE") == "retry" else dict(c, stale=old.get("built", "")))
         kept += 1
     return kept
 
@@ -371,5 +423,7 @@ def carry_forward(index, new_tiles, prev="prev"):
 if __name__ == "__main__":
     if sys.argv[1] == "part":
         part(int(sys.argv[2]), int(sys.argv[3]))
+    elif sys.argv[1] == "retry":
+        retry(sys.argv[2])
     else:
         merge()
