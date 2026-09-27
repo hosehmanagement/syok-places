@@ -1,19 +1,59 @@
 name: Build place packs
 
-# Runs on the 1st of every month (and whenever you press "Run workflow").
-# 5 parallel jobs download 20 cities each from OpenStreetMap + Wikivoyage,
-# then one job splits everything into small area files and publishes them
-# to the "data" branch (history is replaced each time, so the repo stays small).
+# FULL run: 03:17 UTC on the 1st of every month (and whenever you press "Run workflow" with mode "full").
+#   5 parallel jobs download 20 cities each from OpenStreetMap + Wikivoyage, then one job splits everything
+#   into small area files and publishes them to the "data" branch.
+# RETRY run: any city that failed is written to missing.json on the data branch. A tiny check runs every hour
+#   during days 1-7 of the month; 6 hours after a failed run it downloads ONLY those cities again
+#   (every other city keeps its files). Up to 5 retries, then the city waits for next month's full run.
 on:
   schedule:
-    - cron: "17 3 1 * *"
+    - cron: "17 3 1 * *"   # monthly full run
+    - cron: "47 * 1-7 * *" # hourly retry check, first week of the month only (~1 minute each)
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "full = all 100 cities, retry = only the cities that failed last time"
+        type: choice
+        options: [full, retry]
+        default: full
 
 permissions:
   contents: write
 
+concurrency:
+  group: place-packs
+  cancel-in-progress: false
+
 jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      mode: ${{ steps.pick.outputs.mode }}
+    steps:
+      - id: pick
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "mode=${{ inputs.mode }}" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if [ "${{ github.event.schedule }}" = "17 3 1 * *" ]; then
+            echo "mode=full" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          # Hourly check: is there a failed city whose 6-hour wait is over?
+          m=$(gh api "repos/${{ github.repository }}/contents/missing.json?ref=data" -H "Accept: application/vnd.github.raw" 2>/dev/null || echo '{}')
+          echo "$m" | python3 -c '
+          import json, sys, time
+          m = json.load(sys.stdin) or {}
+          due = m.get("geos") and not m.get("give_up") and time.time() >= m.get("retry_after", 0)
+          print("mode=retry" if due else "mode=none")
+          if due: print("Retrying:", ", ".join(m["geos"]), file=sys.stderr)
+          ' >> "$GITHUB_OUTPUT"
+
   harvest:
+    needs: plan
+    if: needs.plan.outputs.mode == 'full'
     runs-on: ubuntu-latest
     timeout-minutes: 350
     strategy:
@@ -34,10 +74,37 @@ jobs:
           path: out/part-${{ matrix.part }}.json
           retention-days: 3
 
-  publish:
-    needs: harvest
-    if: always()
+  retry:
+    needs: plan
+    if: needs.plan.outputs.mode == 'retry'
     runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Which cities failed last time?
+        run: |
+          gh api "repos/${{ github.repository }}/contents/missing.json?ref=data" -H "Accept: application/vnd.github.raw" > missing.json || echo '{}' > missing.json
+          gh api "repos/${{ github.repository }}/contents/index.json?ref=data" -H "Accept: application/vnd.github.raw" > index.json || rm -f index.json
+      - run: python harvest.py retry missing.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: part-retry
+          if-no-files-found: warn
+          path: out/part-retry.json
+          retention-days: 3
+
+  publish:
+    needs: [plan, harvest, retry]
+    if: always() && (needs.plan.outputs.mode == 'full' || needs.plan.outputs.mode == 'retry')
+    runs-on: ubuntu-latest
+    env:
+      MODE: ${{ needs.plan.outputs.mode }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -46,7 +113,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: out
-      - name: Get last month's files (kept for any city that fails this time)
+      - name: Get the current files (kept for every city not downloaded in this run)
         run: git fetch -q --depth=1 origin data && git worktree add -q prev FETCH_HEAD || echo "no previous data yet"
       - run: python harvest.py merge
       - name: Publish to the data branch
@@ -57,5 +124,5 @@ jobs:
           git config user.name "syok-places-bot"
           git config user.email "actions@users.noreply.github.com"
           git add -A
-          git commit -q -m "Place packs $(date -u +%Y-%m-%d)"
+          git commit -q -m "Place packs $(date -u +%Y-%m-%d) ($MODE run)"
           git push -q -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" data
